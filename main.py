@@ -43,7 +43,7 @@ def get_worksheet():
         if not client:
             return None
         
-        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', 'Orders')
+        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', 'Market Sniper Subscriptions')
         spreadsheet = client.open(sheet_name)
         worksheet = spreadsheet.sheet1
         return worksheet
@@ -63,7 +63,7 @@ def find_user_in_sheets(email):
         
         # Search for email
         email = email.lower().strip()
-        for row_num, record in enumerate(records, start=2):
+        for row_num, record in enumerate(records, start=2):  # start=2 because row 1 is header
             sheet_email = str(record.get('Email', '')).lower().strip()
             if sheet_email == email:
                 return {
@@ -164,16 +164,18 @@ async def on_message(message):
             
             if user_data:
                 # Email found in sheets!
-                status = user_data['data'].get('Status', 'Unknown')
+                # Check both 'Status' and 'Payment Status' columns
+                status = user_data['data'].get('Status') or user_data['data'].get('Payment Status', 'Unknown')
                 
-                if status.lower() == 'active':
+                # Only accept PAID as valid status
+                if status.upper() == 'PAID':
                     # Update sheets with Discord verification
                     discord_username = f"{message.author.name}#{message.author.discriminator}"
                     update_discord_verified_status(email, discord_username, True)
                     
                     await message.channel.send(
                         f"✅ Email `{email}` verified!\n\n"
-                        f"Your subscription is **Active**. "
+                        f"Your payment is confirmed (**{status}**). "
                         f"You should receive your **Subscriber** role automatically. "
                         f"If you don't receive it in a few minutes, contact support."
                     )
@@ -188,7 +190,8 @@ async def on_message(message):
                     print(f"✅ Email verified: {message.author.name} -> {email}")
                 else:
                     await message.channel.send(
-                        f"⚠️ Email `{email}` found, but subscription status is: **{status}**\n\n"
+                        f"⚠️ Email `{email}` found, but payment status is: **{status}**\n\n"
+                        f"Access is only granted for **PAID** subscriptions. "
                         f"Please complete your purchase or contact support if this is an error."
                     )
             else:
@@ -266,13 +269,13 @@ async def syncsheets(ctx):
         synced = 0
         
         for record in records:
-            status = record.get('Status', '').lower()
+            payment_status = record.get('Payment Status') or record.get('Status', '')
             discord_verified = record.get('Discord Verified', '').lower()
             
-            if status == 'active' and discord_verified == 'yes':
+            if payment_status.upper() == 'PAID' and discord_verified == 'yes':
                 synced += 1
         
-        await ctx.send(f"✅ Checked {len(records)} records, {synced} active & verified subscribers")
+        await ctx.send(f"✅ Checked {len(records)} records, {synced} paid & verified subscribers")
     except Exception as e:
         await ctx.send(f"❌ Error: {e}")
 
@@ -302,6 +305,15 @@ def webhook():
                 'error': f'Email {email} not found in Google Sheets',
                 'note': 'Make sure Zapier added the user to sheets first'
             }), 404
+        
+        # Check payment status - only accept PAID
+        payment_status = user_data['data'].get('Payment Status') or user_data['data'].get('Status', 'Unknown')
+        
+        if payment_status.upper() != 'PAID':
+            return jsonify({
+                'error': f'Payment status is {payment_status}, must be PAID for access',
+                'note': 'Only PAID subscriptions get Discord access'
+            }), 400
         
         # Check if user verified their Discord
         discord_verified = user_data['data'].get('Discord Verified', '').lower()
