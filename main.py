@@ -83,7 +83,7 @@ def find_user_in_sheets(email):
         print(f"Error finding user in sheets: {e}")
         return None
 
-def update_discord_verified_status(email, discord_username, discord_user_id=None, verified=True):
+def update_discord_verified_status(email, discord_username, discord_user_id, verified=True):
     """Update Discord verification status in Google Sheets"""
     try:
         worksheet = get_worksheet()
@@ -103,11 +103,11 @@ def update_discord_verified_status(email, discord_username, discord_user_id=None
         discord_user_id_col = None
         
         for i, header in enumerate(headers, start=1):
-            if 'Discord Verified' in header or 'discord_verified' in header.lower():
+            if 'Discord Verified' in header:
                 discord_verified_col = i
-            if 'Discord Username' in header or 'discord_username' in header.lower():
+            if 'Discord Username' in header and 'ID' not in header:
                 discord_username_col = i
-            if 'discord_user_id' in header.lower():
+            if 'Discord User ID' in header:
                 discord_user_id_col = i
         
         # Update cells
@@ -115,10 +115,10 @@ def update_discord_verified_status(email, discord_username, discord_user_id=None
             worksheet.update_cell(row_num, discord_verified_col, 'Yes' if verified else 'No')
         if discord_username_col:
             worksheet.update_cell(row_num, discord_username_col, discord_username)
-        if discord_user_id_col and discord_user_id:
+        if discord_user_id_col:
             worksheet.update_cell(row_num, discord_user_id_col, str(discord_user_id))
         
-        print(f"Updated sheets for {email}: verified={verified}, username={discord_username}")
+        print(f"Updated sheets for {email}: verified={verified}, username={discord_username}, user_id={discord_user_id}")
         return True
     except Exception as e:
         print(f"Error updating sheets: {e}")
@@ -182,7 +182,32 @@ async def on_message(message):
                 
                 # Only accept PAID as valid status
                 if status.upper() == 'PAID':
-                    # Update sheets with Discord verification
+                    # CHECK IF EMAIL IS ALREADY CLAIMED BY ANOTHER USER
+                    existing_discord_verified = user_data['data'].get('Discord Verified', '').lower()
+                    existing_discord_user_id = str(user_data['data'].get('Discord User ID', '')).strip()
+                    current_user_id = str(message.author.id)
+                    
+                    # If already verified and it's a different user, BLOCK
+                    if existing_discord_verified == 'yes' and existing_discord_user_id and existing_discord_user_id != current_user_id:
+                        existing_username = user_data['data'].get('Discord Username', 'another user')
+                        await message.channel.send(
+                            f"🚫 **Email Already Registered**\n\n"
+                            f"The email `{email}` is already linked to another Discord account (`{existing_username}`).\n\n"
+                            f"If this is your email and you need to update your Discord account, please contact support."
+                        )
+                        print(f"⚠️ Blocked hijack attempt: {message.author.name} (ID: {current_user_id}) tried to use {email} (already owned by user ID {existing_discord_user_id})")
+                        return
+                    
+                    # If it's the same user re-verifying, allow it
+                    if existing_discord_verified == 'yes' and existing_discord_user_id == current_user_id:
+                        await message.channel.send(
+                            f"ℹ️ You've already verified this email!\n\n"
+                            f"Your account is already linked and you have your role. "
+                            f"If you're missing your role, please contact support."
+                        )
+                        return
+                    
+                    # New verification - store both username and user ID
                     discord_username = f"{message.author.name}"
                     discord_user_id = str(message.author.id)
                     update_discord_verified_status(email, discord_username, discord_user_id, True)
@@ -200,7 +225,7 @@ async def on_message(message):
                         if member:
                             bot.loop.create_task(assign_subscriber_role(member, email))
                     
-                    print(f"✅ Email verified: {message.author.name} -> {email}")
+                    print(f"✅ Email verified: {message.author.name} (ID: {discord_user_id}) -> {email}")
                 else:
                     await message.channel.send(
                         f"⚠️ Email `{email}` found, but payment status is: **{status}**\n\n"
@@ -368,22 +393,22 @@ def webhook():
                 'note': 'User needs to DM the bot with their email first'
             }), 400
         
-        # Get Discord username from sheets
-        discord_username = user_data['data'].get('Discord Username', '')
+        # Get Discord User ID from sheets (for finding the member)
+        discord_user_id = user_data['data'].get('Discord User ID', '')
         
-        if not discord_username:
+        if not discord_user_id:
             return jsonify({
-                'error': f'No Discord username stored for {email}',
+                'error': f'No Discord User ID stored for {email}',
                 'note': 'User needs to verify via DM first'
             }), 400
         
         # Find the Discord user and process action
-        bot.loop.create_task(handle_role_change_by_username(discord_username, action, email))
+        bot.loop.create_task(handle_role_change_by_user_id(discord_user_id, action, email))
         
         return jsonify({
             'success': True,
             'email': email,
-            'discord_username': discord_username,
+            'discord_user_id': discord_user_id,
             'action': action,
             'payment_status': payment_status
         }), 200
@@ -392,8 +417,8 @@ def webhook():
         print(f"Webhook error: {e}")
         return jsonify({'error': str(e)}), 500
 
-async def handle_role_change_by_username(discord_username, action, email):
-    """Handle role change using Discord username from sheets"""
+async def handle_role_change_by_user_id(discord_user_id, action, email):
+    """Handle role change using Discord User ID from sheets"""
     try:
         if not bot.guilds:
             print("Bot not in any servers")
@@ -401,15 +426,16 @@ async def handle_role_change_by_username(discord_username, action, email):
         
         guild = bot.guilds[0]
         
-        # Parse username (handle both username#1234 and username formats)
-        if '#' in discord_username:
-            username, discriminator = discord_username.split('#', 1)
-            member = discord.utils.get(guild.members, name=username, discriminator=discriminator)
-        else:
-            member = discord.utils.get(guild.members, name=discord_username)
+        # Get member by user ID
+        try:
+            user_id = int(discord_user_id)
+            member = guild.get_member(user_id)
+        except (ValueError, TypeError):
+            print(f"Invalid user ID format: {discord_user_id}")
+            return
         
         if not member:
-            print(f"Member not found in server: {discord_username}")
+            print(f"Member not found in server: {discord_user_id}")
             return
         
         # Get user's product from sheets to determine which role to assign/remove
@@ -448,7 +474,9 @@ async def handle_role_change_by_username(discord_username, action, email):
         elif action == 'remove_role':
             await member.remove_roles(role)
             
-            update_discord_verified_status(email, discord_username, None, False)
+            # Get username for update
+            discord_username = user_data['data'].get('Discord Username', '') if user_data else ''
+            update_discord_verified_status(email, discord_username, discord_user_id, False)
             
             try:
                 await member.send(
@@ -465,7 +493,9 @@ async def handle_role_change_by_username(discord_username, action, email):
         elif action == 'kick':
             await member.remove_roles(role)
             
-            update_discord_verified_status(email, discord_username, None, False)
+            # Get username for update
+            discord_username = user_data['data'].get('Discord Username', '') if user_data else ''
+            update_discord_verified_status(email, discord_username, discord_user_id, False)
             
             try:
                 await member.send(
