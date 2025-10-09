@@ -338,14 +338,26 @@ def webhook():
                 'note': 'Make sure Zapier added the user to sheets first'
             }), 404
         
-        # Check payment status - only accept PAID
+        # Check payment status
         payment_status = user_data['data'].get('Payment Status') or user_data['data'].get('Status', 'Unknown')
+        payment_status_upper = payment_status.upper()
         
-        if payment_status.upper() != 'PAID':
-            return jsonify({
-                'error': f'Payment status is {payment_status}, must be PAID for access',
-                'note': 'Only PAID subscriptions get Discord access'
-            }), 400
+        # For add_role: Must be PAID
+        # For remove_role/kick: Must be Refunded or Cancelled (we're removing access)
+        if action == 'add_role':
+            if payment_status_upper != 'PAID':
+                return jsonify({
+                    'error': f'Payment status is {payment_status}, must be PAID to add role',
+                    'note': 'Only PAID subscriptions get Discord access'
+                }), 400
+        elif action in ['remove_role', 'kick']:
+            # Only process removals if status is Refunded or Cancelled
+            if payment_status_upper not in ['REFUNDED', 'CANCELLED']:
+                return jsonify({
+                    'error': f'Payment status is {payment_status}, must be REFUNDED or CANCELLED to remove access',
+                    'note': 'Only refunded or cancelled orders trigger role removal'
+                }), 400
+            print(f"Processing {action} for {email} with status: {payment_status}")
         
         # Check if user verified their Discord
         discord_verified = user_data['data'].get('Discord Verified', '').lower()
@@ -372,7 +384,8 @@ def webhook():
             'success': True,
             'email': email,
             'discord_username': discord_username,
-            'action': action
+            'action': action,
+            'payment_status': payment_status
         }), 200
         
     except Exception as e:
