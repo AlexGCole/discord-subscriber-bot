@@ -1,2 +1,4 @@
 discord.py==2.3.2
 Flask==3.0.0
+gspread==5.12.0
+oauth2client==4.1.3
