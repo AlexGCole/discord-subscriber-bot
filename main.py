@@ -21,7 +21,7 @@ app = Flask(__name__)
 # ============================================
 PRODUCT_ROLE_MAP = {
     '7995703263412': 'Bot Suite',  # Monthly Bot Suite
-    '7995703296180': 'Bot Suite',  # Annual Bot Suite
+    '7995706015924': 'Bot Suite',  # Annual Bot Suite
 }
 
 # Google Sheets setup
@@ -232,35 +232,28 @@ async def assign_subscriber_role(member, email):
             print(f"⚠️ Could not find user data for {email}")
             return
         
-        product_id = str(user_data['data'].get('product_id', '')).strip()
+        # Use "Product ID" (with space and capitals) as it appears in your sheet
+        product_id = str(user_data['data'].get('Product ID', '')).strip()
         
-        # Get the correct role ID based on product
-        role_id = PRODUCT_ROLE_MAP.get(product_id)
+        # Get the role name based on product
+        role_name = PRODUCT_ROLE_MAP.get(product_id)
         
-        if not role_id:
+        if not role_name:
             print(f"⚠️ No role mapping found for product ID: {product_id}")
             # Fallback to default Subscriber role
-            role = discord.utils.get(guild.roles, name="Subscriber")
-            if not role:
-                role = await guild.create_role(
-                    name="Subscriber",
-                    color=discord.Color.gold(),
-                    reason="Auto-created for subscription management"
-                )
-        else:
-            # Get the role by ID from the mapping
-            role = guild.get_role(int(role_id))
-            
-            if not role:
-                print(f"⚠️ Role with ID {role_id} not found in server")
-                # Fallback to creating/using default role
-                role = discord.utils.get(guild.roles, name="Subscriber")
-                if not role:
-                    role = await guild.create_role(
-                        name="Subscriber",
-                        color=discord.Color.gold(),
-                        reason="Auto-created for subscription management"
-                    )
+            role_name = "Subscriber"
+        
+        # Get or create the role
+        role = discord.utils.get(guild.roles, name=role_name)
+        
+        if not role:
+            # If role doesn't exist, create it
+            role = await guild.create_role(
+                name=role_name,
+                color=discord.Color.blue(),
+                reason="Auto-created for subscription management"
+            )
+            print(f"Created new role: {role_name}")
         
         # Add role
         await member.add_roles(role)
@@ -408,20 +401,20 @@ async def handle_role_change_by_username(discord_username, action, email):
         
         # Get user's product from sheets to determine which role to assign/remove
         user_data = find_user_in_sheets(email)
-        product_id = str(user_data['data'].get('product_id', '')).strip() if user_data else None
-        role_id = PRODUCT_ROLE_MAP.get(product_id) if product_id else None
+        product_id = str(user_data['data'].get('Product ID', '')).strip() if user_data else None
+        role_name = PRODUCT_ROLE_MAP.get(product_id) if product_id else None
         
         # Get the appropriate role
-        if role_id:
-            role = guild.get_role(int(role_id))
+        if role_name:
+            role = discord.utils.get(guild.roles, name=role_name)
         else:
             # Fallback to Subscriber role
             role = discord.utils.get(guild.roles, name="Subscriber")
         
         if not role:
             role = await guild.create_role(
-                name="Subscriber",
-                color=discord.Color.gold(),
+                name=role_name or "Subscriber",
+                color=discord.Color.blue(),
                 reason="Auto-created for subscription management"
             )
         
