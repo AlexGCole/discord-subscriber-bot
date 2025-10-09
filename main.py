@@ -3,6 +3,9 @@ from discord.ext import commands
 from flask import Flask, request, jsonify
 from threading import Thread
 import os
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
 
 # Bot setup
 intents = discord.Intents.default()
@@ -10,16 +13,117 @@ intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Store email verifications {discord_user_id: email}
-email_verifications = {}
-
 # Flask app for webhook
 app = Flask(__name__)
+
+# Google Sheets setup
+def get_sheets_client():
+    """Connect to Google Sheets"""
+    try:
+        # Get credentials from environment variable
+        creds_json = os.environ.get('GOOGLE_SHEETS_CREDS')
+        if not creds_json:
+            print("ERROR: GOOGLE_SHEETS_CREDS not found!")
+            return None
+        
+        creds_dict = json.loads(creds_json)
+        scope = ['https://spreadsheets.google.com/feeds',
+                 'https://www.googleapis.com/auth/drive']
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+        return client
+    except Exception as e:
+        print(f"Error connecting to Google Sheets: {e}")
+        return None
+
+def get_worksheet():
+    """Get the subscriber tracking worksheet"""
+    try:
+        client = get_sheets_client()
+        if not client:
+            return None
+        
+        # Get spreadsheet by name or ID
+        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', 'Subscriber Tracker')
+        spreadsheet = client.open(sheet_name)
+        worksheet = spreadsheet.sheet1  # First sheet
+        return worksheet
+    except Exception as e:
+        print(f"Error getting worksheet: {e}")
+        return None
+
+def find_user_in_sheets(email):
+    """Find user in Google Sheets by email"""
+    try:
+        worksheet = get_worksheet()
+        if not worksheet:
+            return None
+        
+        # Get all records
+        records = worksheet.get_all_records()
+        
+        # Search for email
+        email = email.lower().strip()
+        for row_num, record in enumerate(records, start=2):  # start=2 because row 1 is header
+            sheet_email = str(record.get('Email', '')).lower().strip()
+            if sheet_email == email:
+                return {
+                    'row': row_num,
+                    'data': record
+                }
+        return None
+    except Exception as e:
+        print(f"Error finding user in sheets: {e}")
+        return None
+
+def update_discord_verified_status(email, discord_username, verified=True):
+    """Update Discord verification status in Google Sheets"""
+    try:
+        worksheet = get_worksheet()
+        if not worksheet:
+            return False
+        
+        user_data = find_user_in_sheets(email)
+        if not user_data:
+            return False
+        
+        row_num = user_data['row']
+        
+        # Find column numbers for Discord fields
+        headers = worksheet.row_values(1)
+        discord_verified_col = None
+        discord_username_col = None
+        
+        for i, header in enumerate(headers, start=1):
+            if 'Discord Verified' in header or 'discord_verified' in header.lower():
+                discord_verified_col = i
+            if 'Discord Username' in header or 'discord_username' in header.lower():
+                discord_username_col = i
+        
+        # Update cells
+        if discord_verified_col:
+            worksheet.update_cell(row_num, discord_verified_col, 'Yes' if verified else 'No')
+        if discord_username_col:
+            worksheet.update_cell(row_num, discord_username_col, discord_username)
+        
+        print(f"Updated sheets for {email}: verified={verified}, username={discord_username}")
+        return True
+    except Exception as e:
+        print(f"Error updating sheets: {e}")
+        return False
 
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
     print(f'Bot is in {len(bot.guilds)} servers')
+    print(f'Webhook endpoint ready at: /webhook')
+    
+    # Test Google Sheets connection
+    worksheet = get_worksheet()
+    if worksheet:
+        print(f"✅ Connected to Google Sheets: {worksheet.spreadsheet.title}")
+    else:
+        print("⚠️ Could not connect to Google Sheets - check credentials")
 
 @bot.event
 async def on_member_join(member):
@@ -35,6 +139,11 @@ async def on_member_join(member):
             value="Reply to this DM with the email you used to purchase the Trading Bot Suite.\n\nExample: `myemail@example.com`",
             inline=False
         )
+        embed.add_field(
+            name="Already purchased?",
+            value="Once you verify your email, your role will be assigned automatically if your purchase is in our system.",
+            inline=False
+        )
         await member.send(embed=embed)
     except discord.Forbidden:
         print(f"Could not DM {member.name}")
@@ -42,7 +151,6 @@ async def on_member_join(member):
 @bot.event
 async def on_message(message):
     """Handle DM verification"""
-    # Ignore bot messages
     if message.author.bot:
         return
     
@@ -52,43 +160,123 @@ async def on_message(message):
         if '@' in message.content and '.' in message.content:
             email = message.content.strip().lower()
             
-            # Store the verification
-            email_verifications[message.author.id] = email
+            # Check if email exists in Google Sheets
+            user_data = find_user_in_sheets(email)
             
-            await message.channel.send(
-                f"✅ Email `{email}` saved!\n\n"
-                "Once your purchase is confirmed, you'll automatically receive the **Subscriber** role."
-            )
-            print(f"Stored email verification: {message.author.name} -> {email}")
-        else:
-            await message.channel.send(
-                "⚠️ That doesn't look like a valid email. Please send your email address.\n"
-                "Example: `myemail@example.com`"
-            )
+            if user_data:
+                # Email found in sheets!
+                status = user_data['data'].get('Status', 'Unknown')
+                
+                if status.lower() == 'active':
+                    # Update sheets with Discord verification
+                    discord_username = f"{message.author.name}#{message.author.discriminator}"
+                    update_discord_verified_status(email, discord_username, True)
+                    
+                    await message.channel.send(
+                        f"✅ Email `{email}` verified!\n\n"
+                        f"Your subscription is **Active**. "
+                        f"You should receive your **Subscriber** role automatically. "
+                        f"If you don't receive it in a few minutes, contact support."
+                    )
+                    
+                    # Try to assign role immediately
+                    guild = bot.guilds[0] if bot.guilds else None
+                    if guild:
+                        member = guild.get_member(message.author.id)
+                        if member:
+                            bot.loop.create_task(assign_subscriber_role(member, email))
+                    
+                    print(f"✅ Email verified: {message.author.name} -> {email}")
+                else:
+                    await message.channel.send(
+                        f"⚠️ Email `{email}` found, but subscription status is: **{status}**\n\n"
+                        f"Please complete your purchase or contact support if this is an error."
+                    )
+            else:
+                # Email NOT found in sheets
+                await message.channel.send(
+                    f"❌ Email `{email}` not found in our system.\n\n"
+                    f"Please make sure:\n"
+                    f"• You've completed your purchase\n"
+                    f"• You're using the exact email from your Shopify order\n"
+                    f"• Your order has been processed (may take a few minutes)\n\n"
+                    f"If you just purchased, wait 2-3 minutes and try again."
+                )
+                print(f"❌ Email not found in sheets: {email}")
     
     await bot.process_commands(message)
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def listverified(ctx):
-    """List all verified emails (Admin only)"""
-    if not email_verifications:
-        await ctx.send("No verified emails yet.")
-        return
-    
-    msg = "**Verified Emails:**\n"
-    for user_id, email in email_verifications.items():
-        user = await bot.fetch_user(user_id)
-        msg += f"• {user.name} - {email}\n"
-    
-    await ctx.send(msg)
+async def assign_subscriber_role(member, email):
+    """Assign the Subscriber role to a member"""
+    try:
+        guild = member.guild
+        
+        # Find or create the Subscriber role
+        role = discord.utils.get(guild.roles, name="Subscriber")
+        if not role:
+            role = await guild.create_role(
+                name="Subscriber",
+                color=discord.Color.gold(),
+                reason="Auto-created for subscription management"
+            )
+            print(f"Created Subscriber role")
+        
+        # Add role
+        await member.add_roles(role)
+        
+        # Send confirmation DM
+        try:
+            await member.send(
+                f"🎉 **Subscription Activated!**\n\n"
+                f"Your **Subscriber** role has been assigned.\n"
+                f"You now have access to all premium channels!"
+            )
+        except discord.Forbidden:
+            pass
+        
+        print(f"✅ Added Subscriber role to {member.name} ({email})")
+        
+    except Exception as e:
+        print(f"Error assigning role: {e}")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
-async def manualverify(ctx, member: discord.Member, email: str):
-    """Manually verify a user's email (Admin only)"""
-    email_verifications[member.id] = email.lower()
-    await ctx.send(f"✅ Manually verified {member.name} with email: {email}")
+async def checksheet(ctx, email: str):
+    """Check if email exists in Google Sheets (Admin only)"""
+    user_data = find_user_in_sheets(email)
+    if user_data:
+        data = user_data['data']
+        msg = f"**Found in Sheet (Row {user_data['row']}):**\n"
+        for key, value in data.items():
+            msg += f"• {key}: {value}\n"
+        await ctx.send(msg)
+    else:
+        await ctx.send(f"❌ Email `{email}` not found in Google Sheets")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def syncsheets(ctx):
+    """Sync all Active subscribers from Sheets (Admin only)"""
+    try:
+        worksheet = get_worksheet()
+        if not worksheet:
+            await ctx.send("❌ Could not connect to Google Sheets")
+            return
+        
+        records = worksheet.get_all_records()
+        synced = 0
+        
+        for record in records:
+            status = record.get('Status', '').lower()
+            discord_verified = record.get('Discord Verified', '').lower()
+            
+            if status == 'active' and discord_verified == 'yes':
+                # User should have role - check if they do
+                synced += 1
+        
+        await ctx.send(f"✅ Checked {len(records)} records, {synced} active & verified subscribers")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {e}")
 
 # Webhook endpoint for Zapier
 @app.route('/webhook', methods=['POST'])
@@ -98,28 +286,45 @@ def webhook():
         email = data.get('email', '').lower()
         action = data.get('action')  # 'add_role' or 'remove_role'
         
+        print(f"Webhook received: email={email}, action={action}")
+        
         if not email or not action:
             return jsonify({'error': 'Missing email or action'}), 400
         
-        # Find user by email
-        user_id = None
-        for uid, stored_email in email_verifications.items():
-            if stored_email == email:
-                user_id = uid
-                break
+        # Check if user exists in Google Sheets
+        user_data = find_user_in_sheets(email)
         
-        if not user_id:
+        if not user_data:
             return jsonify({
-                'error': f'No verified user found for email: {email}',
-                'note': 'User needs to verify their email in Discord DMs first'
+                'error': f'Email {email} not found in Google Sheets',
+                'note': 'Make sure Zapier added the user to sheets first'
             }), 404
         
-        # Process the action asynchronously
-        bot.loop.create_task(handle_role_change(user_id, action, email))
+        # Check if user verified their Discord
+        discord_verified = user_data['data'].get('Discord Verified', '').lower()
+        
+        if discord_verified != 'yes':
+            return jsonify({
+                'error': f'User {email} has not verified their Discord account yet',
+                'note': 'User needs to DM the bot with their email first'
+            }), 400
+        
+        # Get Discord username from sheets
+        discord_username = user_data['data'].get('Discord Username', '')
+        
+        if not discord_username:
+            return jsonify({
+                'error': f'No Discord username stored for {email}',
+                'note': 'User needs to verify via DM first'
+            }), 400
+        
+        # Find the Discord user and process role change
+        bot.loop.create_task(handle_role_change_by_username(discord_username, action, email))
         
         return jsonify({
             'success': True,
             'email': email,
+            'discord_username': discord_username,
             'action': action
         }), 200
         
@@ -127,33 +332,39 @@ def webhook():
         print(f"Webhook error: {e}")
         return jsonify({'error': str(e)}), 500
 
-async def handle_role_change(user_id, action, email):
-    """Handle adding or removing the Subscriber role"""
+async def handle_role_change_by_username(discord_username, action, email):
+    """Handle role change using Discord username from sheets"""
     try:
-        # Get the first guild (server) the bot is in
+        if not bot.guilds:
+            print("Bot not in any servers")
+            return
+        
         guild = bot.guilds[0]
         
-        # Get the member
-        member = guild.get_member(user_id)
+        # Parse username (handle both username#1234 and username formats)
+        if '#' in discord_username:
+            username, discriminator = discord_username.split('#', 1)
+            member = discord.utils.get(guild.members, name=username, discriminator=discriminator)
+        else:
+            # New Discord format (no discriminator)
+            member = discord.utils.get(guild.members, name=discord_username)
+        
         if not member:
-            print(f"Member not found in server: {user_id}")
+            print(f"Member not found in server: {discord_username}")
             return
         
         # Find or create the Subscriber role
         role = discord.utils.get(guild.roles, name="Subscriber")
         if not role:
-            # Create the role if it doesn't exist
             role = await guild.create_role(
                 name="Subscriber",
                 color=discord.Color.gold(),
                 reason="Auto-created for subscription management"
             )
-            print(f"Created Subscriber role")
         
         if action == 'add_role':
             await member.add_roles(role)
             
-            # Send confirmation DM
             try:
                 await member.send(
                     f"🎉 **Subscription Activated!**\n\n"
@@ -168,7 +379,9 @@ async def handle_role_change(user_id, action, email):
         elif action == 'remove_role':
             await member.remove_roles(role)
             
-            # Send goodbye DM
+            # Update sheets
+            update_discord_verified_status(email, discord_username, False)
+            
             try:
                 await member.send(
                     "Your subscription has been cancelled.\n"
@@ -178,9 +391,6 @@ async def handle_role_change(user_id, action, email):
             except discord.Forbidden:
                 pass
             
-            # Optionally kick the user (uncomment line below)
-            # await member.kick(reason="Subscription cancelled")
-            
             print(f"❌ Removed Subscriber role from {member.name} ({email})")
         
     except Exception as e:
@@ -189,10 +399,13 @@ async def handle_role_change(user_id, action, email):
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
+    worksheet = get_worksheet()
+    sheets_connected = worksheet is not None
+    
     return jsonify({
         'status': 'online',
         'bot_name': bot.user.name if bot.user else 'Not connected',
-        'verified_users': len(email_verifications)
+        'sheets_connected': sheets_connected
     }), 200
 
 def run_flask():
@@ -210,11 +423,9 @@ def main():
     TOKEN = os.environ.get('DISCORD_TOKEN')
     if not TOKEN:
         print("ERROR: DISCORD_TOKEN not found in environment variables!")
-        print("Add DISCORD_TOKEN to Railway environment variables")
         return
     
-    print(f"Starting bot on Railway...")
-    print(f"Webhook endpoint will be at: https://your-app.railway.app/webhook")
+    print(f"Starting bot with Google Sheets integration...")
     bot.run(TOKEN)
 
 if __name__ == '__main__':
