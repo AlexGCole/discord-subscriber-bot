@@ -43,14 +43,9 @@ def get_worksheet():
         if not client:
             return None
         
-        # Get spreadsheet by name or ID
-        sheet_id = os.environ.get('GOOGLE_SHEET_ID')
-if sheet_id:
-    spreadsheet = client.open_by_key(sheet_id)
-else:
-    sheet_name = os.environ.get('GOOGLE_SHEET_NAME', 'Orders')
-    spreadsheet = client.open(sheet_name)
-        worksheet = spreadsheet.sheet1  # First sheet
+        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', 'Orders')
+        spreadsheet = client.open(sheet_name)
+        worksheet = spreadsheet.sheet1
         return worksheet
     except Exception as e:
         print(f"Error getting worksheet: {e}")
@@ -68,7 +63,7 @@ def find_user_in_sheets(email):
         
         # Search for email
         email = email.lower().strip()
-        for row_num, record in enumerate(records, start=2):  # start=2 because row 1 is header
+        for row_num, record in enumerate(records, start=2):
             sheet_email = str(record.get('Email', '')).lower().strip()
             if sheet_email == email:
                 return {
@@ -287,7 +282,7 @@ def webhook():
     try:
         data = request.json
         email = data.get('email', '').lower()
-        action = data.get('action')  # 'add_role', 'remove_role', or 'kick'
+        action = data.get('action')
         
         print(f"Webhook received: email={email}, action={action}")
         
@@ -354,7 +349,6 @@ async def handle_role_change_by_username(discord_username, action, email):
             username, discriminator = discord_username.split('#', 1)
             member = discord.utils.get(guild.members, name=username, discriminator=discriminator)
         else:
-            # New Discord format (no discriminator)
             member = discord.utils.get(guild.members, name=discord_username)
         
         if not member:
@@ -385,10 +379,8 @@ async def handle_role_change_by_username(discord_username, action, email):
             print(f"✅ Added Subscriber role to {member.name} ({email})")
             
         elif action == 'remove_role':
-            # Just remove role, don't kick
             await member.remove_roles(role)
             
-            # Update sheets
             update_discord_verified_status(email, discord_username, False)
             
             try:
@@ -404,13 +396,10 @@ async def handle_role_change_by_username(discord_username, action, email):
             print(f"❌ Removed Subscriber role from {member.name} ({email})")
             
         elif action == 'kick':
-            # Remove role AND kick from server
             await member.remove_roles(role)
             
-            # Update sheets
             update_discord_verified_status(email, discord_username, False)
             
-            # Send goodbye DM before kicking
             try:
                 await member.send(
                     "Your subscription has been cancelled.\n\n"
@@ -420,11 +409,9 @@ async def handle_role_change_by_username(discord_username, action, email):
             except discord.Forbidden:
                 pass
             
-            # Wait a moment for DM to send
             import asyncio
             await asyncio.sleep(1)
             
-            # Kick the user
             await member.kick(reason=f"Subscription cancelled for {email}")
             
             print(f"🚪 Kicked {member.name} ({email}) from server")
@@ -450,12 +437,10 @@ def run_flask():
 
 def main():
     """Start both Flask and Discord bot"""
-    # Start Flask in background thread
     flask_thread = Thread(target=run_flask)
     flask_thread.daemon = True
     flask_thread.start()
     
-    # Start Discord bot
     TOKEN = os.environ.get('DISCORD_TOKEN')
     if not TOKEN:
         print("ERROR: DISCORD_TOKEN not found in environment variables!")
