@@ -16,6 +16,14 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # Flask app for webhook
 app = Flask(__name__)
 
+# ============================================
+# PRODUCT → ROLE MAPPING
+# ============================================
+PRODUCT_ROLE_MAP = {
+    '7995703263412': 'Bot Suite',  # Monthly Bot Suite
+    '7995703296180': 'Bot Suite',  # Annual Bot Suite
+}
+
 # Google Sheets setup
 def get_sheets_client():
     """Connect to Google Sheets"""
@@ -75,7 +83,7 @@ def find_user_in_sheets(email):
         print(f"Error finding user in sheets: {e}")
         return None
 
-def update_discord_verified_status(email, discord_username, verified=True):
+def update_discord_verified_status(email, discord_username, discord_user_id=None, verified=True):
     """Update Discord verification status in Google Sheets"""
     try:
         worksheet = get_worksheet()
@@ -92,18 +100,23 @@ def update_discord_verified_status(email, discord_username, verified=True):
         headers = worksheet.row_values(1)
         discord_verified_col = None
         discord_username_col = None
+        discord_user_id_col = None
         
         for i, header in enumerate(headers, start=1):
             if 'Discord Verified' in header or 'discord_verified' in header.lower():
                 discord_verified_col = i
             if 'Discord Username' in header or 'discord_username' in header.lower():
                 discord_username_col = i
+            if 'discord_user_id' in header.lower():
+                discord_user_id_col = i
         
         # Update cells
         if discord_verified_col:
             worksheet.update_cell(row_num, discord_verified_col, 'Yes' if verified else 'No')
         if discord_username_col:
             worksheet.update_cell(row_num, discord_username_col, discord_username)
+        if discord_user_id_col and discord_user_id:
+            worksheet.update_cell(row_num, discord_user_id_col, str(discord_user_id))
         
         print(f"Updated sheets for {email}: verified={verified}, username={discord_username}")
         return True
@@ -129,8 +142,8 @@ async def on_member_join(member):
     """Send verification DM when someone joins"""
     try:
         embed = discord.Embed(
-            title="Welcome! 🎉",
-            description="To get your **Subscriber** role, please verify your email.",
+            title="Welcome to Market Sniper! 🎉",
+            description="To get your role and access, please verify your email.",
             color=discord.Color.blue()
         )
         embed.add_field(
@@ -140,7 +153,7 @@ async def on_member_join(member):
         )
         embed.add_field(
             name="Already purchased?",
-            value="Once you verify your email, your role will be assigned automatically if your purchase is in our system.",
+            value="Once you verify your email, your role will be assigned automatically based on your subscription.",
             inline=False
         )
         await member.send(embed=embed)
@@ -170,14 +183,14 @@ async def on_message(message):
                 # Only accept PAID as valid status
                 if status.upper() == 'PAID':
                     # Update sheets with Discord verification
-                    discord_username = f"{message.author.name}#{message.author.discriminator}"
-                    update_discord_verified_status(email, discord_username, True)
+                    discord_username = f"{message.author.name}"
+                    discord_user_id = str(message.author.id)
+                    update_discord_verified_status(email, discord_username, discord_user_id, True)
                     
                     await message.channel.send(
                         f"✅ Email `{email}` verified!\n\n"
                         f"Your payment is confirmed (**{status}**). "
-                        f"You should receive your **Subscriber** role automatically. "
-                        f"If you don't receive it in a few minutes, contact support."
+                        f"Assigning your role now..."
                     )
                     
                     # Try to assign role immediately
@@ -209,19 +222,45 @@ async def on_message(message):
     await bot.process_commands(message)
 
 async def assign_subscriber_role(member, email):
-    """Assign the Subscriber role to a member"""
+    """Assign the appropriate role based on product purchased"""
     try:
         guild = member.guild
         
-        # Find or create the Subscriber role
-        role = discord.utils.get(guild.roles, name="Subscriber")
-        if not role:
-            role = await guild.create_role(
-                name="Subscriber",
-                color=discord.Color.gold(),
-                reason="Auto-created for subscription management"
-            )
-            print(f"Created Subscriber role")
+        # Get user's product from sheets
+        user_data = find_user_in_sheets(email)
+        if not user_data:
+            print(f"⚠️ Could not find user data for {email}")
+            return
+        
+        product_id = str(user_data['data'].get('product_id', '')).strip()
+        
+        # Get the correct role ID based on product
+        role_id = PRODUCT_ROLE_MAP.get(product_id)
+        
+        if not role_id:
+            print(f"⚠️ No role mapping found for product ID: {product_id}")
+            # Fallback to default Subscriber role
+            role = discord.utils.get(guild.roles, name="Subscriber")
+            if not role:
+                role = await guild.create_role(
+                    name="Subscriber",
+                    color=discord.Color.gold(),
+                    reason="Auto-created for subscription management"
+                )
+        else:
+            # Get the role by ID from the mapping
+            role = guild.get_role(int(role_id))
+            
+            if not role:
+                print(f"⚠️ Role with ID {role_id} not found in server")
+                # Fallback to creating/using default role
+                role = discord.utils.get(guild.roles, name="Subscriber")
+                if not role:
+                    role = await guild.create_role(
+                        name="Subscriber",
+                        color=discord.Color.gold(),
+                        reason="Auto-created for subscription management"
+                    )
         
         # Add role
         await member.add_roles(role)
@@ -230,13 +269,13 @@ async def assign_subscriber_role(member, email):
         try:
             await member.send(
                 f"🎉 **Subscription Activated!**\n\n"
-                f"Your **Subscriber** role has been assigned.\n"
+                f"Your **{role.name}** role has been assigned.\n"
                 f"You now have access to all premium channels!"
             )
         except discord.Forbidden:
             pass
         
-        print(f"✅ Added Subscriber role to {member.name} ({email})")
+        print(f"✅ Added {role.name} role to {member.name} ({email}) for product {product_id}")
         
     except Exception as e:
         print(f"Error assigning role: {e}")
@@ -367,8 +406,18 @@ async def handle_role_change_by_username(discord_username, action, email):
             print(f"Member not found in server: {discord_username}")
             return
         
-        # Find or create the Subscriber role
-        role = discord.utils.get(guild.roles, name="Subscriber")
+        # Get user's product from sheets to determine which role to assign/remove
+        user_data = find_user_in_sheets(email)
+        product_id = str(user_data['data'].get('product_id', '')).strip() if user_data else None
+        role_id = PRODUCT_ROLE_MAP.get(product_id) if product_id else None
+        
+        # Get the appropriate role
+        if role_id:
+            role = guild.get_role(int(role_id))
+        else:
+            # Fallback to Subscriber role
+            role = discord.utils.get(guild.roles, name="Subscriber")
+        
         if not role:
             role = await guild.create_role(
                 name="Subscriber",
@@ -382,35 +431,35 @@ async def handle_role_change_by_username(discord_username, action, email):
             try:
                 await member.send(
                     f"🎉 **Subscription Activated!**\n\n"
-                    f"Your **Subscriber** role has been assigned.\n"
+                    f"Your **{role.name}** role has been assigned.\n"
                     f"You now have access to all premium channels!"
                 )
             except discord.Forbidden:
                 pass
             
-            print(f"✅ Added Subscriber role to {member.name} ({email})")
+            print(f"✅ Added {role.name} role to {member.name} ({email})")
             
         elif action == 'remove_role':
             await member.remove_roles(role)
             
-            update_discord_verified_status(email, discord_username, False)
+            update_discord_verified_status(email, discord_username, None, False)
             
             try:
                 await member.send(
-                    "Your subscription has been cancelled.\n"
-                    "The **Subscriber** role has been removed.\n\n"
-                    "You can still hang out in the server! "
-                    "Rejoin anytime by resubscribing. 😊"
+                    f"Your subscription has been cancelled.\n"
+                    f"The **{role.name}** role has been removed.\n\n"
+                    f"You can still hang out in the server! "
+                    f"Rejoin anytime by resubscribing. 😊"
                 )
             except discord.Forbidden:
                 pass
             
-            print(f"❌ Removed Subscriber role from {member.name} ({email})")
+            print(f"❌ Removed {role.name} role from {member.name} ({email})")
             
         elif action == 'kick':
             await member.remove_roles(role)
             
-            update_discord_verified_status(email, discord_username, False)
+            update_discord_verified_status(email, discord_username, None, False)
             
             try:
                 await member.send(
