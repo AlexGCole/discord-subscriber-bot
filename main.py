@@ -44,8 +44,12 @@ def get_worksheet():
             return None
         
         # Get spreadsheet by name or ID
-        sheet_name = os.environ.get('GOOGLE_SHEET_NAME', 'Subscriber Tracker')
-        spreadsheet = client.open(sheet_name)
+        sheet_id = os.environ.get('GOOGLE_SHEET_ID')
+if sheet_id:
+    spreadsheet = client.open_by_key(sheet_id)
+else:
+    sheet_name = os.environ.get('GOOGLE_SHEET_NAME', 'Orders')
+    spreadsheet = client.open(sheet_name)
         worksheet = spreadsheet.sheet1  # First sheet
         return worksheet
     except Exception as e:
@@ -271,7 +275,6 @@ async def syncsheets(ctx):
             discord_verified = record.get('Discord Verified', '').lower()
             
             if status == 'active' and discord_verified == 'yes':
-                # User should have role - check if they do
                 synced += 1
         
         await ctx.send(f"✅ Checked {len(records)} records, {synced} active & verified subscribers")
@@ -284,12 +287,17 @@ def webhook():
     try:
         data = request.json
         email = data.get('email', '').lower()
-        action = data.get('action')  # 'add_role' or 'remove_role'
+        action = data.get('action')  # 'add_role', 'remove_role', or 'kick'
         
         print(f"Webhook received: email={email}, action={action}")
         
         if not email or not action:
             return jsonify({'error': 'Missing email or action'}), 400
+        
+        # Validate action
+        valid_actions = ['add_role', 'remove_role', 'kick']
+        if action not in valid_actions:
+            return jsonify({'error': f'Invalid action. Must be one of: {valid_actions}'}), 400
         
         # Check if user exists in Google Sheets
         user_data = find_user_in_sheets(email)
@@ -318,7 +326,7 @@ def webhook():
                 'note': 'User needs to verify via DM first'
             }), 400
         
-        # Find the Discord user and process role change
+        # Find the Discord user and process action
         bot.loop.create_task(handle_role_change_by_username(discord_username, action, email))
         
         return jsonify({
@@ -377,6 +385,7 @@ async def handle_role_change_by_username(discord_username, action, email):
             print(f"✅ Added Subscriber role to {member.name} ({email})")
             
         elif action == 'remove_role':
+            # Just remove role, don't kick
             await member.remove_roles(role)
             
             # Update sheets
@@ -386,12 +395,39 @@ async def handle_role_change_by_username(discord_username, action, email):
                 await member.send(
                     "Your subscription has been cancelled.\n"
                     "The **Subscriber** role has been removed.\n\n"
-                    "Thanks for being a subscriber! Feel free to rejoin anytime."
+                    "You can still hang out in the server! "
+                    "Rejoin anytime by resubscribing. 😊"
                 )
             except discord.Forbidden:
                 pass
             
             print(f"❌ Removed Subscriber role from {member.name} ({email})")
+            
+        elif action == 'kick':
+            # Remove role AND kick from server
+            await member.remove_roles(role)
+            
+            # Update sheets
+            update_discord_verified_status(email, discord_username, False)
+            
+            # Send goodbye DM before kicking
+            try:
+                await member.send(
+                    "Your subscription has been cancelled.\n\n"
+                    "You've been removed from the server. "
+                    "Thanks for being a subscriber! Feel free to rejoin anytime. 👋"
+                )
+            except discord.Forbidden:
+                pass
+            
+            # Wait a moment for DM to send
+            import asyncio
+            await asyncio.sleep(1)
+            
+            # Kick the user
+            await member.kick(reason=f"Subscription cancelled for {email}")
+            
+            print(f"🚪 Kicked {member.name} ({email}) from server")
         
     except Exception as e:
         print(f"Error handling role change: {e}")
