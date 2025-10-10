@@ -22,6 +22,7 @@ app = Flask(__name__)
 PRODUCT_ROLE_MAP = {
     '7995703263412': 'Bot Suite',  # Monthly Bot Suite
     '7995706015924': 'Bot Suite',  # Annual Bot Suite
+    '7996025995444' : 'Indicator Suite'
 }
 
 # Google Sheets setup
