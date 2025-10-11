@@ -248,7 +248,7 @@ async def on_message(message):
     await bot.process_commands(message)
 
 async def assign_subscriber_role(member, email):
-    """Assign the appropriate role based on product purchased"""
+    """Assign the appropriate role(s) based on product purchased"""
     try:
         guild = member.guild
         
@@ -262,43 +262,51 @@ async def assign_subscriber_role(member, email):
         product_id = str(user_data['data'].get('Product ID', '')).strip()
         
         # Get the role name based on product
-        role_name = PRODUCT_ROLE_MAP.get(product_id)
+        role_names = PRODUCT_ROLE_MAP.get(product_id)
         
-        if not role_name:
+        if not role_names:
             print(f"⚠️ No role mapping found for product ID: {product_id}")
             # Fallback to default Subscriber role
-            role_name = "Subscriber"
+            role_names = ["Subscriber"]
         
-        # Get or create the role
-        role = discord.utils.get(guild.roles, name=role_name)
+        # Convert single string to list for backwards compatibility
+        if isinstance(role_names, str):
+            role_names = [role_names]
         
-        if not role:
-            # If role doesn't exist, create it
-            role = await guild.create_role(
-                name=role_name,
-                color=discord.Color.blue(),
-                reason="Auto-created for subscription management"
-            )
-            print(f"Created new role: {role_name}")
+        assigned_roles = []
         
-        # Add role
-        await member.add_roles(role)
+        # Assign each role
+        for role_name in role_names:
+            role = discord.utils.get(guild.roles, name=role_name)
+            
+            if not role:
+                # Create role if it doesn't exist
+                role = await guild.create_role(
+                    name=role_name,  # NOW PASSING A SINGLE STRING
+                    color=discord.Color.blue(),
+                    reason="Auto-created for subscription management"
+                )
+                print(f"Created new role: {role_name}")
+            
+            await member.add_roles(role)
+            assigned_roles.append(role.name)
         
         # Send confirmation DM
         try:
+            roles_text = ", ".join([f"**{r}**" for r in assigned_roles])
             await member.send(
                 f"🎉 **Subscription Activated!**\n\n"
-                f"Your **{role.name}** role has been assigned.\n"
+                f"Your roles have been assigned: {roles_text}\n"
                 f"You now have access to all premium channels!"
             )
         except discord.Forbidden:
             pass
         
-        print(f"✅ Added {role.name} role to {member.name} ({email}) for product {product_id}")
+        print(f"✅ Added roles {assigned_roles} to {member.name} ({email}) for product {product_id}")
         
     except Exception as e:
         print(f"Error assigning role: {e}")
-
+        
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def checksheet(ctx, email: str):
