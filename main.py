@@ -439,60 +439,67 @@ async def handle_role_change_by_user_id(discord_user_id, action, email):
             print(f"Member not found in server: {discord_user_id}")
             return
         
-        # Get user's product from sheets to determine which role to assign/remove
+        # Get user's product from sheets
         user_data = find_user_in_sheets(email)
         product_id = str(user_data['data'].get('Product ID', '')).strip() if user_data else None
-        role_name = PRODUCT_ROLE_MAP.get(product_id) if product_id else None
+        role_names = PRODUCT_ROLE_MAP.get(product_id) if product_id else None
         
-        # Get the appropriate role
-        if role_name:
+        # Handle as list
+        if isinstance(role_names, str):
+            role_names = [role_names]
+        elif not role_names:
+            role_names = ["Subscriber"]
+        
+        roles_to_modify = []
+        
+        # Get or create all roles
+        for role_name in role_names:
             role = discord.utils.get(guild.roles, name=role_name)
-        else:
-            # Fallback to Subscriber role
-            role = discord.utils.get(guild.roles, name="Subscriber")
-        
-        if not role:
-            role = await guild.create_role(
-                name=role_name or "Subscriber",
-                color=discord.Color.blue(),
-                reason="Auto-created for subscription management"
-            )
+            if not role:
+                role = await guild.create_role(
+                    name=role_name,
+                    color=discord.Color.blue(),
+                    reason="Auto-created for subscription management"
+                )
+            roles_to_modify.append(role)
         
         if action == 'add_role':
-            await member.add_roles(role)
+            await member.add_roles(*roles_to_modify)
             
             try:
+                roles_text = ", ".join([f"**{r.name}**" for r in roles_to_modify])
                 await member.send(
                     f"🎉 **Subscription Activated!**\n\n"
-                    f"Your **{role.name}** role has been assigned.\n"
+                    f"Your roles have been assigned: {roles_text}\n"
                     f"You now have access to all premium channels!"
                 )
             except discord.Forbidden:
                 pass
             
-            print(f"✅ Added {role.name} role to {member.name} ({email})")
+            print(f"✅ Added roles {[r.name for r in roles_to_modify]} to {member.name} ({email})")
             
         elif action == 'remove_role':
-            await member.remove_roles(role)
+            await member.remove_roles(*roles_to_modify)
             
             # Get username for update
             discord_username = user_data['data'].get('Discord Username', '') if user_data else ''
             update_discord_verified_status(email, discord_username, discord_user_id, False)
             
             try:
+                roles_text = ", ".join([f"**{r.name}**" for r in roles_to_modify])
                 await member.send(
                     f"Your subscription has been cancelled.\n"
-                    f"The **{role.name}** role has been removed.\n\n"
+                    f"The following roles have been removed: {roles_text}\n\n"
                     f"You can still hang out in the server! "
                     f"Rejoin anytime by resubscribing. 😊"
                 )
             except discord.Forbidden:
                 pass
             
-            print(f"❌ Removed {role.name} role from {member.name} ({email})")
+            print(f"❌ Removed roles {[r.name for r in roles_to_modify]} from {member.name} ({email})")
             
         elif action == 'kick':
-            await member.remove_roles(role)
+            await member.remove_roles(*roles_to_modify)
             
             # Get username for update
             discord_username = user_data['data'].get('Discord Username', '') if user_data else ''
