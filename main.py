@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify
 from threading import Thread
 import os
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import json
 
 # Bot setup
@@ -38,7 +38,9 @@ def get_sheets_client():
         creds_dict = json.loads(creds_json)
         scope = ['https://spreadsheets.google.com/feeds',
                  'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        
+        # Use modern google-auth library
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
         client = gspread.authorize(creds)
         return client
     except Exception as e:
