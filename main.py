@@ -20,10 +20,14 @@ app = Flask(__name__)
 # PRODUCT → ROLE MAPPING
 # ============================================
 PRODUCT_ROLE_MAP = {
-    '7995703263412': ['Bot Suite', 'Member'],
-    '7995706015924': ['Bot Suite', 'Member'],
-    '7996025995444' : ['Indicator Suite', 'Member']
+    '7995703263412': ['Bot Suite', 'Member'],  # Monthly
+    '7995706015924': ['Bot Suite', 'Member'],  # Annual
+    '7996025995444': ['Indicator Suite', 'Member'], #Placeholder for future tier
+    '7995945418932': ['Bot Suite Setup']  # Setup fee - tracking only, NO server access
 }
+
+# Products that grant server access
+ACCESS_PRODUCTS = ['7995703263412', '7995706015924', '7996025995444']
 
 # Google Sheets setup
 def get_sheets_client():
@@ -62,42 +66,48 @@ def get_worksheet():
         print(f"Error getting worksheet: {e}")
         return None
 
-def find_user_in_sheets(email):
-    """Find user in Google Sheets by email"""
+def find_all_user_rows(email):
+    """Find ALL rows for a user by email (handles multiple products)"""
     try:
         worksheet = get_worksheet()
         if not worksheet:
-            return None
+            return []
         
         # Get all records
         records = worksheet.get_all_records()
         
-        # Search for email
+        # Search for all matching emails
         email = email.lower().strip()
-        for row_num, record in enumerate(records, start=2):  # start=2 because row 1 is header
+        matching_rows = []
+        
+        for row_num, record in enumerate(records, start=2):
             sheet_email = str(record.get('Email', '')).lower().strip()
             if sheet_email == email:
-                return {
+                matching_rows.append({
                     'row': row_num,
                     'data': record
-                }
-        return None
+                })
+        
+        return matching_rows
     except Exception as e:
         print(f"Error finding user in sheets: {e}")
-        return None
+        return []
 
-def update_discord_verified_status(email, discord_username, discord_user_id, verified=True):
-    """Update Discord verification status in Google Sheets"""
+def find_user_in_sheets(email):
+    """Find user in Google Sheets by email (returns first match for backwards compatibility)"""
+    rows = find_all_user_rows(email)
+    return rows[0] if rows else None
+
+def update_discord_verified_status_all_rows(email, discord_username, discord_user_id, verified=True):
+    """Update Discord verification status for ALL rows with this email"""
     try:
         worksheet = get_worksheet()
         if not worksheet:
             return False
         
-        user_data = find_user_in_sheets(email)
-        if not user_data:
+        user_rows = find_all_user_rows(email)
+        if not user_rows:
             return False
-        
-        row_num = user_data['row']
         
         # Find column numbers for Discord fields
         headers = worksheet.row_values(1)
@@ -113,19 +123,42 @@ def update_discord_verified_status(email, discord_username, discord_user_id, ver
             if 'Discord User ID' in header:
                 discord_user_id_col = i
         
-        # Update cells
-        if discord_verified_col:
-            worksheet.update_cell(row_num, discord_verified_col, 'Yes' if verified else 'No')
-        if discord_username_col:
-            worksheet.update_cell(row_num, discord_username_col, discord_username)
-        if discord_user_id_col:
-            worksheet.update_cell(row_num, discord_user_id_col, str(discord_user_id))
+        # Update ALL rows with this email
+        for user_row in user_rows:
+            row_num = user_row['row']
+            
+            if discord_verified_col:
+                worksheet.update_cell(row_num, discord_verified_col, 'Yes' if verified else 'No')
+            if discord_username_col:
+                worksheet.update_cell(row_num, discord_username_col, discord_username)
+            if discord_user_id_col:
+                worksheet.update_cell(row_num, discord_user_id_col, str(discord_user_id))
+            
+            product_id = user_row['data'].get('Product ID', 'Unknown')
+            print(f"Updated row {row_num} (Product {product_id}) for {email}: verified={verified}")
         
-        print(f"Updated sheets for {email}: verified={verified}, username={discord_username}, user_id={discord_user_id}")
         return True
     except Exception as e:
         print(f"Error updating sheets: {e}")
         return False
+
+def update_discord_verified_status(email, discord_username, discord_user_id, verified=True):
+    """Wrapper for backwards compatibility - now updates ALL rows"""
+    return update_discord_verified_status_all_rows(email, discord_username, discord_user_id, verified)
+
+def has_active_subscription(email):
+    """Check if user has an active subscription (not just setup)"""
+    user_rows = find_all_user_rows(email)
+    
+    for row in user_rows:
+        product_id = str(row['data'].get('Product ID', '')).strip()
+        status = row['data'].get('Status') or row['data'].get('Payment Status', 'Unknown')
+        
+        # Check if this is an access-granting product and it's paid
+        if product_id in ACCESS_PRODUCTS and status.upper() == 'PAID':
+            return True
+    
+    return False
 
 @bot.event
 async def on_ready():
@@ -151,7 +184,7 @@ async def on_member_join(member):
         )
         embed.add_field(
             name="How to verify:",
-            value="Reply to this DM with the email you used to purchase the Trading Bot Suite.\n\nExample: `myemail@example.com`",
+            value="Reply to this DM with the email you used to purchase.\n\nExample: `myemail@example.com`",
             inline=False
         )
         embed.add_field(
@@ -175,24 +208,19 @@ async def on_message(message):
         if '@' in message.content and '.' in message.content:
             email = message.content.strip().lower()
             
-            # Check if email exists in Google Sheets
-            user_data = find_user_in_sheets(email)
+            # Get ALL rows for this email
+            user_rows = find_all_user_rows(email)
             
-            if user_data:
-                # Email found in sheets!
-                # Check both 'Status' and 'Payment Status' columns
-                status = user_data['data'].get('Status') or user_data['data'].get('Payment Status', 'Unknown')
-                
-                # Only accept PAID as valid status
-                if status.upper() == 'PAID':
-                    # CHECK IF EMAIL IS ALREADY CLAIMED BY ANOTHER USER
-                    existing_discord_verified = user_data['data'].get('Discord Verified', '').lower()
-                    existing_discord_user_id = str(user_data['data'].get('Discord User ID', '')).strip()
+            if user_rows:
+                # Check if ANY row has a different Discord user already verified
+                for row in user_rows:
+                    existing_discord_verified = row['data'].get('Discord Verified', '').lower()
+                    existing_discord_user_id = str(row['data'].get('Discord User ID', '')).strip()
                     current_user_id = str(message.author.id)
                     
                     # If already verified and it's a different user, BLOCK
                     if existing_discord_verified == 'yes' and existing_discord_user_id and existing_discord_user_id != current_user_id:
-                        existing_username = user_data['data'].get('Discord Username', 'another user')
+                        existing_username = row['data'].get('Discord Username', 'another user')
                         await message.channel.send(
                             f"🚫 **Email Already Registered**\n\n"
                             f"The email `{email}` is already linked to another Discord account (`{existing_username}`).\n\n"
@@ -200,41 +228,49 @@ async def on_message(message):
                         )
                         print(f"⚠️ Blocked hijack attempt: {message.author.name} (ID: {current_user_id}) tried to use {email} (already owned by user ID {existing_discord_user_id})")
                         return
-                    
-                    # If it's the same user re-verifying, allow it
-                    if existing_discord_verified == 'yes' and existing_discord_user_id == current_user_id:
-                        await message.channel.send(
-                            f"ℹ️ You've already verified this email!\n\n"
-                            f"Your account is already linked and you have your role. "
-                            f"If you're missing your role, please contact support."
-                        )
-                        return
-                    
-                    # New verification - store both username and user ID
-                    discord_username = f"{message.author.name}"
-                    discord_user_id = str(message.author.id)
-                    update_discord_verified_status(email, discord_username, discord_user_id, True)
-                    
+                
+                # Check if user has an active subscription (not just setup)
+                has_access = has_active_subscription(email)
+                
+                if not has_access:
+                    # User only has setup product or no PAID products
                     await message.channel.send(
-                        f"✅ Email `{email}` verified!\n\n"
-                        f"Your payment is confirmed (**{status}**). "
-                        f"Assigning your role now..."
+                        f"⚠️ **Setup Product Only**\n\n"
+                        f"The email `{email}` is registered, but you only have the setup fee product.\n\n"
+                        f"To get Discord access, you need to purchase a monthly or annual subscription. "
+                        f"The setup fee alone does not grant server access."
                     )
-                    
-                    # Try to assign role immediately
-                    guild = bot.guilds[0] if bot.guilds else None
-                    if guild:
-                        member = guild.get_member(message.author.id)
-                        if member:
-                            bot.loop.create_task(assign_subscriber_role(member, email))
-                    
-                    print(f"✅ Email verified: {message.author.name} (ID: {discord_user_id}) -> {email}")
-                else:
+                    print(f"⚠️ User {email} tried to verify but only has setup product")
+                    return
+                
+                # If it's the same user re-verifying, allow it
+                if user_rows[0]['data'].get('Discord Verified', '').lower() == 'yes' and \
+                   str(user_rows[0]['data'].get('Discord User ID', '')).strip() == str(message.author.id):
                     await message.channel.send(
-                        f"⚠️ Email `{email}` found, but payment status is: **{status}**\n\n"
-                        f"Access is only granted for **PAID** subscriptions. "
-                        f"Please complete your purchase or contact support if this is an error."
+                        f"ℹ️ You've already verified this email!\n\n"
+                        f"Your account is already linked and you have your role. "
+                        f"If you're missing your role, please contact support."
                     )
+                    return
+                
+                # New verification - update ALL rows for this email
+                discord_username = f"{message.author.name}"
+                discord_user_id = str(message.author.id)
+                update_discord_verified_status_all_rows(email, discord_username, discord_user_id, True)
+                
+                await message.channel.send(
+                    f"✅ Email `{email}` verified!\n\n"
+                    f"Your subscription is confirmed. Assigning your roles now..."
+                )
+                
+                # Try to assign role immediately
+                guild = bot.guilds[0] if bot.guilds else None
+                if guild:
+                    member = guild.get_member(message.author.id)
+                    if member:
+                        bot.loop.create_task(assign_all_subscriber_roles(member, email))
+                
+                print(f"✅ Email verified: {message.author.name} (ID: {discord_user_id}) -> {email} (updated {len(user_rows)} rows)")
             else:
                 # Email NOT found in sheets
                 await message.channel.send(
@@ -249,42 +285,47 @@ async def on_message(message):
     
     await bot.process_commands(message)
 
-async def assign_subscriber_role(member, email):
-    """Assign the appropriate role(s) based on product purchased"""
+async def assign_all_subscriber_roles(member, email):
+    """Assign roles for ALL products the user has purchased"""
     try:
         guild = member.guild
         
-        # Get user's product from sheets
-        user_data = find_user_in_sheets(email)
-        if not user_data:
+        # Get ALL user's products from sheets
+        user_rows = find_all_user_rows(email)
+        if not user_rows:
             print(f"⚠️ Could not find user data for {email}")
             return
         
-        # Use "Product ID" (with space and capitals) as it appears in your sheet
-        product_id = str(user_data['data'].get('Product ID', '')).strip()
+        all_roles_to_assign = set()  # Use set to avoid duplicates
         
-        # Get the role name based on product
-        role_names = PRODUCT_ROLE_MAP.get(product_id)
+        # Collect roles from all PAID products
+        for row in user_rows:
+            status = row['data'].get('Status') or row['data'].get('Payment Status', 'Unknown')
+            
+            if status.upper() == 'PAID':
+                product_id = str(row['data'].get('Product ID', '')).strip()
+                role_names = PRODUCT_ROLE_MAP.get(product_id)
+                
+                if role_names:
+                    if isinstance(role_names, str):
+                        all_roles_to_assign.add(role_names)
+                    else:
+                        all_roles_to_assign.update(role_names)
         
-        if not role_names:
-            print(f"⚠️ No role mapping found for product ID: {product_id}")
-            # Fallback to default Subscriber role
-            role_names = ["Subscriber"]
-        
-        # Convert single string to list for backwards compatibility
-        if isinstance(role_names, str):
-            role_names = [role_names]
+        if not all_roles_to_assign:
+            print(f"⚠️ No valid roles found for {email}")
+            return
         
         assigned_roles = []
         
-        # Assign each role
-        for role_name in role_names:
+        # Assign each unique role
+        for role_name in all_roles_to_assign:
             role = discord.utils.get(guild.roles, name=role_name)
             
             if not role:
                 # Create role if it doesn't exist
                 role = await guild.create_role(
-                    name=role_name,  # NOW PASSING A SINGLE STRING
+                    name=role_name,
                     color=discord.Color.blue(),
                     reason="Auto-created for subscription management"
                 )
@@ -304,21 +345,28 @@ async def assign_subscriber_role(member, email):
         except discord.Forbidden:
             pass
         
-        print(f"✅ Added roles {assigned_roles} to {member.name} ({email}) for product {product_id}")
+        print(f"✅ Added roles {assigned_roles} to {member.name} ({email})")
         
     except Exception as e:
-        print(f"Error assigning role: {e}")
+        print(f"Error assigning roles: {e}")
+
+async def assign_subscriber_role(member, email):
+    """Backwards compatibility wrapper"""
+    await assign_all_subscriber_roles(member, email)
         
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def checksheet(ctx, email: str):
     """Check if email exists in Google Sheets (Admin only)"""
-    user_data = find_user_in_sheets(email)
-    if user_data:
-        data = user_data['data']
-        msg = f"**Found in Sheet (Row {user_data['row']}):**\n"
-        for key, value in data.items():
-            msg += f"• {key}: {value}\n"
+    user_rows = find_all_user_rows(email)
+    if user_rows:
+        msg = f"**Found {len(user_rows)} row(s) for {email}:**\n\n"
+        for i, user_row in enumerate(user_rows, 1):
+            data = user_row['data']
+            msg += f"**Row {user_row['row']}:**\n"
+            for key, value in data.items():
+                msg += f"• {key}: {value}\n"
+            msg += "\n"
         await ctx.send(msg)
     else:
         await ctx.send(f"❌ Email `{email}` not found in Google Sheets")
@@ -354,8 +402,9 @@ def webhook():
         data = request.json
         email = data.get('email', '').lower()
         action = data.get('action')
+        product_id = data.get('product_id', '').strip()  # NEW: Get specific product ID
         
-        print(f"Webhook received: email={email}, action={action}")
+        print(f"Webhook received: email={email}, action={action}, product_id={product_id}")
         
         if not email or not action:
             return jsonify({'error': 'Missing email or action'}), 400
@@ -366,26 +415,50 @@ def webhook():
             return jsonify({'error': f'Invalid action. Must be one of: {valid_actions}'}), 400
         
         # Check if user exists in Google Sheets
-        user_data = find_user_in_sheets(email)
+        user_rows = find_all_user_rows(email)
         
-        if not user_data:
+        if not user_rows:
             return jsonify({
                 'error': f'Email {email} not found in Google Sheets',
                 'note': 'Make sure Zapier added the user to sheets first'
             }), 404
         
+        # If product_id specified, find that specific row
+        target_row = None
+        if product_id:
+            for row in user_rows:
+                if str(row['data'].get('Product ID', '')).strip() == product_id:
+                    target_row = row
+                    break
+        else:
+            # Default to first row if no product_id specified
+            target_row = user_rows[0]
+        
+        if not target_row:
+            return jsonify({
+                'error': f'Product ID {product_id} not found for email {email}',
+                'note': 'Check that the product_id matches what\'s in your sheet'
+            }), 404
+        
         # Check payment status
-        payment_status = user_data['data'].get('Payment Status') or user_data['data'].get('Status', 'Unknown')
+        payment_status = target_row['data'].get('Payment Status') or target_row['data'].get('Status', 'Unknown')
         payment_status_upper = payment_status.upper()
         
         # For add_role: Must be PAID
-        # For remove_role/kick: Must be Refunded or Cancelled (we're removing access)
         if action == 'add_role':
             if payment_status_upper != 'PAID':
                 return jsonify({
                     'error': f'Payment status is {payment_status}, must be PAID to add role',
                     'note': 'Only PAID subscriptions get Discord access'
                 }), 400
+            
+            # Check if this is a setup product (no server access)
+            if product_id and product_id not in ACCESS_PRODUCTS:
+                return jsonify({
+                    'error': f'Product {product_id} does not grant server access',
+                    'note': 'Setup products are tracked but don\'t give Discord access'
+                }), 400
+                
         elif action in ['remove_role', 'kick']:
             # Only process removals if status is Refunded or Cancelled
             if payment_status_upper not in ['REFUNDED', 'CANCELLED']:
@@ -396,7 +469,7 @@ def webhook():
             print(f"Processing {action} for {email} with status: {payment_status}")
         
         # Check if user verified their Discord
-        discord_verified = user_data['data'].get('Discord Verified', '').lower()
+        discord_verified = target_row['data'].get('Discord Verified', '').lower()
         
         if discord_verified != 'yes':
             return jsonify({
@@ -404,8 +477,8 @@ def webhook():
                 'note': 'User needs to DM the bot with their email first'
             }), 400
         
-        # Get Discord User ID from sheets (for finding the member)
-        discord_user_id = user_data['data'].get('Discord User ID', '')
+        # Get Discord User ID from sheets
+        discord_user_id = target_row['data'].get('Discord User ID', '')
         
         if not discord_user_id:
             return jsonify({
@@ -414,13 +487,14 @@ def webhook():
             }), 400
         
         # Find the Discord user and process action
-        bot.loop.create_task(handle_role_change_by_user_id(discord_user_id, action, email))
+        bot.loop.create_task(handle_role_change_by_user_id(discord_user_id, action, email, product_id))
         
         return jsonify({
             'success': True,
             'email': email,
             'discord_user_id': discord_user_id,
             'action': action,
+            'product_id': product_id,
             'payment_status': payment_status
         }), 200
         
@@ -428,7 +502,7 @@ def webhook():
         print(f"Webhook error: {e}")
         return jsonify({'error': str(e)}), 500
 
-async def handle_role_change_by_user_id(discord_user_id, action, email):
+async def handle_role_change_by_user_id(discord_user_id, action, email, product_id=None):
     """Handle role change using Discord User ID from sheets"""
     try:
         if not bot.guilds:
@@ -450,86 +524,87 @@ async def handle_role_change_by_user_id(discord_user_id, action, email):
             return
         
         # Get user's product from sheets
-        user_data = find_user_in_sheets(email)
-        product_id = str(user_data['data'].get('Product ID', '')).strip() if user_data else None
-        role_names = PRODUCT_ROLE_MAP.get(product_id) if product_id else None
-        
-        # Handle as list
-        if isinstance(role_names, str):
-            role_names = [role_names]
-        elif not role_names:
-            role_names = ["Subscriber"]
-        
-        roles_to_modify = []
-        
-        # Get or create all roles
-        for role_name in role_names:
-            role = discord.utils.get(guild.roles, name=role_name)
-            if not role:
-                role = await guild.create_role(
-                    name=role_name,
-                    color=discord.Color.blue(),
-                    reason="Auto-created for subscription management"
-                )
-            roles_to_modify.append(role)
+        user_rows = find_all_user_rows(email)
         
         if action == 'add_role':
-            await member.add_roles(*roles_to_modify)
+            # Add roles for all PAID products
+            await assign_all_subscriber_roles(member, email)
             
-            try:
-                roles_text = ", ".join([f"**{r.name}**" for r in roles_to_modify])
-                await member.send(
-                    f"🎉 **Subscription Activated!**\n\n"
-                    f"Your roles have been assigned: {roles_text}\n"
-                    f"You now have access to all premium channels!"
-                )
-            except discord.Forbidden:
-                pass
+        elif action in ['remove_role', 'kick']:
+            # Remove roles based on the specific product being cancelled
+            if product_id:
+                role_names = PRODUCT_ROLE_MAP.get(product_id)
+            else:
+                # If no product_id, remove all roles
+                role_names = []
+                for row in user_rows:
+                    pid = str(row['data'].get('Product ID', '')).strip()
+                    rnames = PRODUCT_ROLE_MAP.get(pid)
+                    if rnames:
+                        if isinstance(rnames, str):
+                            role_names.append(rnames)
+                        else:
+                            role_names.extend(rnames)
+                role_names = list(set(role_names))  # Remove duplicates
             
-            print(f"✅ Added roles {[r.name for r in roles_to_modify]} to {member.name} ({email})")
+            # Handle as list
+            if isinstance(role_names, str):
+                role_names = [role_names]
+            elif not role_names:
+                role_names = ["Subscriber"]
             
-        elif action == 'remove_role':
-            await member.remove_roles(*roles_to_modify)
+            roles_to_modify = []
             
-            # Get username for update
-            discord_username = user_data['data'].get('Discord Username', '') if user_data else ''
-            update_discord_verified_status(email, discord_username, discord_user_id, False)
+            # Get roles to remove
+            for role_name in role_names:
+                role = discord.utils.get(guild.roles, name=role_name)
+                if role:
+                    roles_to_modify.append(role)
             
-            try:
-                roles_text = ", ".join([f"**{r.name}**" for r in roles_to_modify])
-                await member.send(
-                    f"Your subscription has been cancelled.\n"
-                    f"The following roles have been removed: {roles_text}\n\n"
-                    f"You can still hang out in the server! "
-                    f"Rejoin anytime by resubscribing. 😊"
-                )
-            except discord.Forbidden:
-                pass
-            
-            print(f"❌ Removed roles {[r.name for r in roles_to_modify]} from {member.name} ({email})")
-            
-        elif action == 'kick':
-            await member.remove_roles(*roles_to_modify)
-            
-            # Get username for update
-            discord_username = user_data['data'].get('Discord Username', '') if user_data else ''
-            update_discord_verified_status(email, discord_username, discord_user_id, False)
-            
-            try:
-                await member.send(
-                    "Your subscription has been cancelled.\n\n"
-                    "You've been removed from the server. "
-                    "Thanks for being a subscriber! Feel free to rejoin anytime. 👋"
-                )
-            except discord.Forbidden:
-                pass
-            
-            import asyncio
-            await asyncio.sleep(1)
-            
-            await member.kick(reason=f"Subscription cancelled for {email}")
-            
-            print(f"🚪 Kicked {member.name} ({email}) from server")
+            if action == 'remove_role':
+                await member.remove_roles(*roles_to_modify)
+                
+                # Update sheets - mark as unverified
+                user_row = next((r for r in user_rows if str(r['data'].get('Product ID', '')).strip() == product_id), user_rows[0])
+                discord_username = user_row['data'].get('Discord Username', '') if user_row else ''
+                update_discord_verified_status(email, discord_username, discord_user_id, False)
+                
+                try:
+                    roles_text = ", ".join([f"**{r.name}**" for r in roles_to_modify])
+                    await member.send(
+                        f"Your subscription has been cancelled.\n"
+                        f"The following roles have been removed: {roles_text}\n\n"
+                        f"You can still hang out in the server! "
+                        f"Rejoin anytime by resubscribing. 😊"
+                    )
+                except discord.Forbidden:
+                    pass
+                
+                print(f"❌ Removed roles {[r.name for r in roles_to_modify]} from {member.name} ({email})")
+                
+            elif action == 'kick':
+                await member.remove_roles(*roles_to_modify)
+                
+                # Update sheets
+                user_row = next((r for r in user_rows if str(r['data'].get('Product ID', '')).strip() == product_id), user_rows[0])
+                discord_username = user_row['data'].get('Discord Username', '') if user_row else ''
+                update_discord_verified_status(email, discord_username, discord_user_id, False)
+                
+                try:
+                    await member.send(
+                        "Your subscription has been cancelled.\n\n"
+                        "You've been removed from the server. "
+                        "Thanks for being a subscriber! Feel free to rejoin anytime. 👋"
+                    )
+                except discord.Forbidden:
+                    pass
+                
+                import asyncio
+                await asyncio.sleep(1)
+                
+                await member.kick(reason=f"Subscription cancelled for {email}")
+                
+                print(f"🚪 Kicked {member.name} ({email}) from server")
         
     except Exception as e:
         print(f"Error handling role change: {e}")
@@ -545,24 +620,6 @@ def health():
         'bot_name': bot.user.name if bot.user else 'Not connected',
         'sheets_connected': sheets_connected
     }), 200
-
-def run_flask():
-    """Run Flask in a separate thread"""
-    app.run(host='0.0.0.0', port=8080)
-
-def main():
-    """Start both Flask and Discord bot"""
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    TOKEN = os.environ.get('DISCORD_TOKEN')
-    if not TOKEN:
-        print("ERROR: DISCORD_TOKEN not found in environment variables!")
-        return
-    
-    print(f"Starting bot with Google Sheets integration...")
-    bot.run(TOKEN)
 
 def run_flask():
     from waitress import serve
