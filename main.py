@@ -368,9 +368,6 @@ async def assign_all_subscriber_roles(member, email):
             await member.add_roles(role)
             assigned_roles.append(role.name)
         
-        # Send confirmation DM (only for initial verification, not for webhook additions)
-        # Webhook handler will send its own DM
-        
         print(f"✅ Added roles {assigned_roles} to {member.name} ({email})")
         return assigned_roles
         
@@ -430,7 +427,7 @@ def webhook():
         data = request.json
         email = data.get('email', '').lower()
         action = data.get('action')
-        product_id = data.get('product_id', '').strip()  # NEW: Get specific product ID
+        product_id = data.get('product_id', '').strip()
         
         print(f"Webhook received: email={email}, action={action}, product_id={product_id}")
         
@@ -452,7 +449,6 @@ def webhook():
             }), 404
         
         # For add_role: Check if user is verified in ANY of their ACCESS PRODUCT rows
-        # Don't check setup products for verification - only actual subscription products
         if action == 'add_role':
             # Find Discord User ID from any ACCESS PRODUCT row that's verified
             discord_user_id = None
@@ -473,16 +469,27 @@ def webhook():
                     'note': 'User needs to DM the bot with their email first or already be in the server'
                 }), 400
             
-            # Check if this is a setup product (no server access)
+            # Setup products: Check if user has active subscription before assigning
             if product_id and product_id not in ACCESS_PRODUCTS:
-                print(f"Setup product {product_id} - tracking only, no roles assigned")
-                return jsonify({
-                    'success': True,
-                    'message': f'Setup product {product_id} tracked but does not grant Discord access',
-                    'note': 'Setup products are for tracking only'
-                }), 200
-            
-            print(f"Processing add_role for {email} with Discord User ID: {discord_user_id}")
+                # Check if user has any active ACCESS_PRODUCT subscription
+                has_active_access = False
+                for row in user_rows:
+                    row_product_id = str(row['data'].get('Product ID', '')).strip()
+                    status = row['data'].get('Status') or row['data'].get('Payment Status', 'Unknown')
+                    if row_product_id in ACCESS_PRODUCTS and status.upper() == 'PAID':
+                        has_active_access = True
+                        break
+                
+                if not has_active_access:
+                    print(f"Setup product {product_id} - user has no active subscription, tracking only")
+                    return jsonify({
+                        'success': True,
+                        'message': f'Setup product {product_id} tracked but user needs an active subscription for Discord access',
+                        'note': 'Setup products require an active monthly/annual subscription'
+                    }), 200
+                
+                # User has active subscription, continue to assign setup role
+                print(f"Setup product {product_id} - user has active subscription, will assign setup role")
         
         # For remove_role/kick: Find the specific product row
         elif action in ['remove_role', 'kick']:
