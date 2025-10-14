@@ -23,7 +23,7 @@ PRODUCT_ROLE_MAP = {
     '7995703263412': ['Bot Suite', 'Member'],  # Monthly
     '7995706015924': ['Bot Suite', 'Member'],  # Annual
     '7996025995444': ['Indicator Suite', 'Member'],
-    '7995945418932': ['Setup']  # Setup fee - tracking only, NO server access
+    '7995945418932': ['Bot Suite Setup']  # Setup fee - tracking only, NO server access
 }
 
 # Products that grant server access
@@ -457,9 +457,11 @@ def webhook():
                     if row['data'].get('Discord Verified', '').lower() == 'yes':
                         discord_user_id = row['data'].get('Discord User ID', '')
                         if discord_user_id:
+                            print(f"Found Discord User ID from ACCESS product: {row_product_id}")
                             break
             
             if not discord_user_id:
+                print(f"No verified ACCESS_PRODUCT found for {email}")
                 return jsonify({
                     'error': f'User {email} has not verified their Discord account yet',
                     'note': 'User needs to DM the bot with their email first or already be in the server'
@@ -467,11 +469,14 @@ def webhook():
             
             # Check if this is a setup product (no server access)
             if product_id and product_id not in ACCESS_PRODUCTS:
+                print(f"Setup product {product_id} - tracking only, no roles assigned")
                 return jsonify({
                     'success': True,
                     'message': f'Setup product {product_id} tracked but does not grant Discord access',
                     'note': 'Setup products are for tracking only'
                 }), 200
+            
+            print(f"Processing add_role for {email} with Discord User ID: {discord_user_id}")
         
         # For remove_role/kick: Find the specific product row
         elif action in ['remove_role', 'kick']:
@@ -483,13 +488,22 @@ def webhook():
                         target_row = row
                         break
             else:
-                # Default to first row if no product_id specified
-                target_row = user_rows[0]
+                # No product_id specified - find the most recent REFUNDED/CANCELLED ACCESS_PRODUCT
+                print(f"No product_id specified, searching for cancelled ACCESS_PRODUCT")
+                for row in user_rows:
+                    row_product_id = str(row['data'].get('Product ID', '')).strip()
+                    payment_status = (row['data'].get('Payment Status') or row['data'].get('Status', '')).upper()
+                    
+                    # Find ACCESS_PRODUCTS that are REFUNDED or CANCELLED
+                    if row_product_id in ACCESS_PRODUCTS and payment_status in ['REFUNDED', 'CANCELLED']:
+                        target_row = row
+                        print(f"Found cancelled product: {row_product_id} with status {payment_status}")
+                        break
             
             if not target_row:
                 return jsonify({
-                    'error': f'Product ID {product_id} not found for email {email}',
-                    'note': 'Check that the product_id matches what\'s in your sheet'
+                    'error': f'Product ID {product_id} not found for email {email}' if product_id else f'No cancelled subscription found for {email}',
+                    'note': 'Check that the product_id matches what\'s in your sheet or that a subscription is marked as REFUNDED/CANCELLED'
                 }), 404
             
             # Check payment status
