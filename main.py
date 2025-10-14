@@ -544,6 +544,10 @@ async def handle_role_change_by_user_id(discord_user_id, action, email, product_
             # Add roles for all PAID products
             await assign_all_subscriber_roles(member, email)
             
+            # Update ALL rows with Discord verification info (including the new product row)
+            discord_username = f"{member.name}"
+            update_discord_verified_status_all_rows(email, discord_username, str(member.id), True)
+            
         elif action in ['remove_role', 'kick']:
             # Remove roles based on the specific product being cancelled
             if product_id:
