@@ -23,7 +23,7 @@ PRODUCT_ROLE_MAP = {
     '7995703263412': ['Bot Suite', 'Member'],  # Monthly
     '7995706015924': ['Bot Suite', 'Member'],  # Annual
     '7996025995444': ['Indicator Suite', 'Member'],
-    '7995945418932': ['Bot Suite Setup']  # Setup fee - tracking only, NO server access
+    '7995945418932': ['Setup']  # Setup fee - tracking only, NO server access
 }
 
 # Products that grant server access
