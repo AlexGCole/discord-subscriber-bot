@@ -290,7 +290,19 @@ async def on_message(message):
                 if guild:
                     member = guild.get_member(message.author.id)
                     if member:
-                        bot.loop.create_task(assign_all_subscriber_roles(member, email))
+                        assigned_roles = await assign_all_subscriber_roles(member, email)
+                        
+                        # Send confirmation DM about roles
+                        if assigned_roles:
+                            try:
+                                roles_text = ", ".join([f"**{r}**" for r in assigned_roles])
+                                await message.channel.send(
+                                    f"🎉 **Subscription Activated!**\n\n"
+                                    f"Your roles have been assigned: {roles_text}\n"
+                                    f"You now have access to all premium channels!"
+                                )
+                            except discord.Forbidden:
+                                pass
                 
                 print(f"✅ Email verified: {message.author.name} (ID: {discord_user_id}) -> {email} (updated {len(user_rows)} rows)")
             else:
@@ -316,7 +328,7 @@ async def assign_all_subscriber_roles(member, email):
         user_rows = find_all_user_rows(email)
         if not user_rows:
             print(f"⚠️ Could not find user data for {email}")
-            return
+            return []
         
         all_roles_to_assign = set()  # Use set to avoid duplicates
         
@@ -336,7 +348,7 @@ async def assign_all_subscriber_roles(member, email):
         
         if not all_roles_to_assign:
             print(f"⚠️ No valid roles found for {email}")
-            return
+            return []
         
         assigned_roles = []
         
@@ -356,21 +368,15 @@ async def assign_all_subscriber_roles(member, email):
             await member.add_roles(role)
             assigned_roles.append(role.name)
         
-        # Send confirmation DM
-        try:
-            roles_text = ", ".join([f"**{r}**" for r in assigned_roles])
-            await member.send(
-                f"🎉 **Subscription Activated!**\n\n"
-                f"Your roles have been assigned: {roles_text}\n"
-                f"You now have access to all premium channels!"
-            )
-        except discord.Forbidden:
-            pass
+        # Send confirmation DM (only for initial verification, not for webhook additions)
+        # Webhook handler will send its own DM
         
         print(f"✅ Added roles {assigned_roles} to {member.name} ({email})")
+        return assigned_roles
         
     except Exception as e:
         print(f"Error assigning roles: {e}")
+        return []
 
 async def assign_subscriber_role(member, email):
     """Backwards compatibility wrapper"""
@@ -578,11 +584,25 @@ async def handle_role_change_by_user_id(discord_user_id, action, email, product_
         
         if action == 'add_role':
             # Add roles for all PAID products
-            await assign_all_subscriber_roles(member, email)
+            assigned_roles = await assign_all_subscriber_roles(member, email)
             
             # Update ALL rows with Discord verification info (including the new product row)
             discord_username = f"{member.name}"
             update_discord_verified_status_all_rows(email, discord_username, str(member.id), True)
+            
+            # Send DM notification about which roles were assigned
+            if assigned_roles:
+                try:
+                    roles_text = ", ".join([f"**{r}**" for r in assigned_roles])
+                    await member.send(
+                        f"🎉 **New Purchase Detected!**\n\n"
+                        f"Your roles have been updated: {roles_text}\n"
+                        f"Thank you for your purchase!"
+                    )
+                except discord.Forbidden:
+                    print(f"Could not DM {member.name} about role update")
+            
+            print(f"✅ Webhook add_role completed for {email}, assigned roles: {assigned_roles}")
             
         elif action in ['remove_role', 'kick']:
             # Remove roles based on the specific product being cancelled
