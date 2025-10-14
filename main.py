@@ -73,8 +73,27 @@ def find_all_user_rows(email):
         if not worksheet:
             return []
         
-        # Get all records
-        records = worksheet.get_all_records()
+        # Get all records - use empty2zero to handle empty cells
+        try:
+            records = worksheet.get_all_records(empty2zero=False, head=1, default_blank='')
+        except Exception as e:
+            print(f"Error with get_all_records: {e}")
+            # Fallback: get all values and parse manually
+            all_values = worksheet.get_all_values()
+            if len(all_values) < 2:
+                print("No data rows found in sheet")
+                return []
+            
+            headers = all_values[0]
+            records = []
+            for row in all_values[1:]:
+                record = {}
+                for i, header in enumerate(headers):
+                    if i < len(row):
+                        record[header] = row[i]
+                    else:
+                        record[header] = ''
+                records.append(record)
         
         # Search for all matching emails
         email = email.lower().strip()
@@ -88,9 +107,12 @@ def find_all_user_rows(email):
                     'data': record
                 })
         
+        print(f"Found {len(matching_rows)} row(s) for email: {email}")
         return matching_rows
     except Exception as e:
         print(f"Error finding user in sheets: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 def find_user_in_sheets(email):
