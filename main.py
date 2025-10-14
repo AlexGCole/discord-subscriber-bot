@@ -22,7 +22,7 @@ app = Flask(__name__)
 PRODUCT_ROLE_MAP = {
     '7995703263412': ['Bot Suite', 'Member'],  # Monthly
     '7995706015924': ['Bot Suite', 'Member'],  # Annual
-    '7996025995444': ['Indicator Suite', 'Member'], #Placeholder for future tier
+    '7996025995444': ['Indicator Suite', 'Member'],
     '7995945418932': ['Bot Suite Setup']  # Setup fee - tracking only, NO server access
 }
 
@@ -423,43 +423,57 @@ def webhook():
                 'note': 'Make sure Zapier added the user to sheets first'
             }), 404
         
-        # If product_id specified, find that specific row
-        target_row = None
-        if product_id:
-            for row in user_rows:
-                if str(row['data'].get('Product ID', '')).strip() == product_id:
-                    target_row = row
-                    break
-        else:
-            # Default to first row if no product_id specified
-            target_row = user_rows[0]
-        
-        if not target_row:
-            return jsonify({
-                'error': f'Product ID {product_id} not found for email {email}',
-                'note': 'Check that the product_id matches what\'s in your sheet'
-            }), 404
-        
-        # Check payment status
-        payment_status = target_row['data'].get('Payment Status') or target_row['data'].get('Status', 'Unknown')
-        payment_status_upper = payment_status.upper()
-        
-        # For add_role: Must be PAID
+        # For add_role: Check if user is verified in ANY of their ACCESS PRODUCT rows
+        # Don't check setup products for verification - only actual subscription products
         if action == 'add_role':
-            if payment_status_upper != 'PAID':
+            # Find Discord User ID from any ACCESS PRODUCT row that's verified
+            discord_user_id = None
+            for row in user_rows:
+                row_product_id = str(row['data'].get('Product ID', '')).strip()
+                # Only check verification on products that grant access (not setup)
+                if row_product_id in ACCESS_PRODUCTS:
+                    if row['data'].get('Discord Verified', '').lower() == 'yes':
+                        discord_user_id = row['data'].get('Discord User ID', '')
+                        if discord_user_id:
+                            break
+            
+            if not discord_user_id:
                 return jsonify({
-                    'error': f'Payment status is {payment_status}, must be PAID to add role',
-                    'note': 'Only PAID subscriptions get Discord access'
+                    'error': f'User {email} has not verified their Discord account yet',
+                    'note': 'User needs to DM the bot with their email first or already be in the server'
                 }), 400
             
             # Check if this is a setup product (no server access)
             if product_id and product_id not in ACCESS_PRODUCTS:
                 return jsonify({
-                    'error': f'Product {product_id} does not grant server access',
-                    'note': 'Setup products are tracked but don\'t give Discord access'
-                }), 400
-                
+                    'success': True,
+                    'message': f'Setup product {product_id} tracked but does not grant Discord access',
+                    'note': 'Setup products are for tracking only'
+                }), 200
+        
+        # For remove_role/kick: Find the specific product row
         elif action in ['remove_role', 'kick']:
+            # If product_id specified, find that specific row
+            target_row = None
+            if product_id:
+                for row in user_rows:
+                    if str(row['data'].get('Product ID', '')).strip() == product_id:
+                        target_row = row
+                        break
+            else:
+                # Default to first row if no product_id specified
+                target_row = user_rows[0]
+            
+            if not target_row:
+                return jsonify({
+                    'error': f'Product ID {product_id} not found for email {email}',
+                    'note': 'Check that the product_id matches what\'s in your sheet'
+                }), 404
+            
+            # Check payment status
+            payment_status = target_row['data'].get('Payment Status') or target_row['data'].get('Status', 'Unknown')
+            payment_status_upper = payment_status.upper()
+            
             # Only process removals if status is Refunded or Cancelled
             if payment_status_upper not in ['REFUNDED', 'CANCELLED']:
                 return jsonify({
@@ -467,18 +481,18 @@ def webhook():
                     'note': 'Only refunded or cancelled orders trigger role removal'
                 }), 400
             print(f"Processing {action} for {email} with status: {payment_status}")
-        
-        # Check if user verified their Discord
-        discord_verified = target_row['data'].get('Discord Verified', '').lower()
-        
-        if discord_verified != 'yes':
-            return jsonify({
-                'error': f'User {email} has not verified their Discord account yet',
-                'note': 'User needs to DM the bot with their email first'
-            }), 400
-        
-        # Get Discord User ID from sheets
-        discord_user_id = target_row['data'].get('Discord User ID', '')
+            
+            # Check if user verified their Discord
+            discord_verified = target_row['data'].get('Discord Verified', '').lower()
+            
+            if discord_verified != 'yes':
+                return jsonify({
+                    'error': f'User {email} has not verified their Discord account yet',
+                    'note': 'User needs to DM the bot with their email first'
+                }), 400
+            
+            # Get Discord User ID from sheets
+            discord_user_id = target_row['data'].get('Discord User ID', '')
         
         if not discord_user_id:
             return jsonify({
@@ -494,8 +508,8 @@ def webhook():
             'email': email,
             'discord_user_id': discord_user_id,
             'action': action,
-            'product_id': product_id,
-            'payment_status': payment_status
+            'product_id': product_id or 'all',
+            'payment_status': 'verified' if action == 'add_role' else payment_status
         }), 200
         
     except Exception as e:
